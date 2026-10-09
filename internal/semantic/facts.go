@@ -33,6 +33,7 @@ type TypeContract struct {
 	Source       string `json:"source"`
 	Members      []Fact `json:"members"`
 	TotalMembers int    `json:"total_members"`
+	obj          types.Object
 }
 
 type Leakage struct {
@@ -65,8 +66,10 @@ type Record struct {
 	ReceiverType       *string        `json:"receiver_type"`
 	ReceiverKind       *string        `json:"receiver_kind"`
 	Members            []Fact         `json:"members"`
+	CallName           *string        `json:"call_name"`
 	CallSignature      *string        `json:"call_signature"`
 	ArgumentIndex      *int           `json:"argument_index"`
+	ParameterName      *string        `json:"parameter_name"`
 	ContextTypes       []TypeContract `json:"context_types"`
 	UnresolvedImports  []string       `json:"unresolved_imports"`
 	TypeErrors         int            `json:"type_errors"`
@@ -104,10 +107,9 @@ func analyze(l *Loader, rec *Record, pkgPath string, others []*ast.File, filenam
 		rec.Status, rec.Reason = "failed", sp("caret_out_of_range")
 		return
 	}
-	pos := tf.Pos(caret)
 	files := append([]*ast.File{file}, others...)
 	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{},
-		Uses: map[*ast.Ident]types.Object{}, Scopes: map[ast.Node]*types.Scope{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
+		Uses: map[*ast.Ident]types.Object{}, Scopes: map[ast.Node]*types.Scope{}}
 	nerr := 0
 	conf := types.Config{Importer: l, Error: func(error) { nerr++ }, FakeImportC: true}
 	pkg, _ := conf.Check(pkgPath, l.Fset, files, info)
@@ -116,6 +118,28 @@ func analyze(l *Loader, rec *Record, pkgPath string, others []*ast.File, filenam
 		rec.Status, rec.Reason = "failed", sp("typecheck_no_package")
 		return
 	}
+	rec.AnalysisEngine = "snapshot_typecheck"
+	extractFacts(l, rec, &view{pkg: pkg, info: info, file: file, tf: tf, text: snapshot}, caret, targetText, policy, lim)
+}
+
+// view is a type-checked state in which facts at the caret are read: either the per-caret snapshot check
+// (snapshot_typecheck) or the cached check of the original package (original_scope).
+type view struct {
+	pkg  *types.Package
+	info *types.Info
+	file *ast.File
+	tf   *token.File
+	text []byte // bytes the caret offset indexes (snapshot or original); only text before the caret is read
+	// original_scope only:
+	original     bool
+	identPresent func(string) bool // is a name present in the snapshot package sources
+	strictCut    bool              // strict_prefix: drop declarations of this file at/after the caret
+}
+
+func extractFacts(l *Loader, rec *Record, v *view, caret int, targetText, policy string, lim limits) {
+	pkg, info, file, tf := v.pkg, v.info, v.file, v.tf
+	snapshot := v.text
+	pos := tf.Pos(caret)
 	// minimal display: package name as written at use sites (not the full import path); own package unqualified
 	qual := func(p *types.Package) string {
 		if p == pkg {
@@ -240,6 +264,9 @@ func analyze(l *Loader, rec *Record, pkgPath string, others []*ast.File, filenam
 		return true
 	})
 	scope := pkg.Scope().Innermost(pos)
+	// Visibility is evaluated just before the caret: on a snapshot the statement being typed may end exactly at
+	// the caret (`x := foo.▮` + newline), which would otherwise make its own declarator x visible.
+	visPos := pos - 1
 	seen := map[string]bool{}
 	for s := scope; s != nil && s != pkg.Scope() && s != types.Universe; s = s.Parent() {
 		if isFileScope(pkg, s) {
@@ -250,7 +277,7 @@ func analyze(l *Loader, rec *Record, pkgPath string, others []*ast.File, filenam
 				continue
 			}
 			obj := s.Lookup(name)
-			if _, o := scope.LookupParent(name, pos); o != obj {
+			if _, o := scope.LookupParent(name, visPos); o != obj {
 				continue // shadowed or not yet declared at the caret
 			}
 			if obj.Pos() >= pos {
@@ -351,7 +378,7 @@ func analyze(l *Loader, rec *Record, pkgPath string, others []*ast.File, filenam
 	}
 
 	// expected type / call signature from the prefix tokens of the snapshot (never from the target)
-	expectedFromPrefix(rec, file, info, snapshot, caret, tf, sig, qual)
+	expectedFromPrefix(l, rec, file, info, snapshot, caret, tf, sig, qual, v.original)
 
 	// TYPE contracts of nearby repository types: from in-scope locals/params/receiver only
 	rec.ContextTypes = contextTypes(rec, pkg, scope, pos, declSig, qual, lim)
@@ -372,8 +399,11 @@ func analyze(l *Loader, rec *Record, pkgPath string, others []*ast.File, filenam
 		rec.Status, rec.Reason = "resolved", nil
 	}
 
+	if v.strictCut {
+		cutAfterCaret(rec, l, tf, caret)
+	}
 	NormalizeSlices(rec)
-	audit(rec, l, pkg, file, tf, caret, targetText, policy, info)
+	audit(rec, l, pkg, file, tf, caret, targetText, policy, info, v.identPresent)
 	rec.Prompt = render(rec)
 }
 
@@ -416,7 +446,11 @@ func buildSnapshotFile(l *Loader, filename string, snap []byte, caret, removed i
 		if f == nil {
 			return nil, nil, repairs
 		}
-		return f, l.Fset.File(f.FileStart), repairs
+		tf := l.Fset.File(f.FileStart)
+		if tf != nil && caret <= tf.Size() {
+			StripBodies(f, tf.Pos(caret)) // only the edited function is re-bound
+		}
+		return f, tf, repairs
 	}
 	ds := tfO.Offset(encl.Pos())
 	de := tfO.Offset(encl.End()) - removed // end of the edited declaration in snapshot coordinates
@@ -432,6 +466,9 @@ func buildSnapshotFile(l *Loader, filename string, snap []byte, caret, removed i
 	if f == nil {
 		return nil, nil, repairs
 	}
+	if tf := l.Fset.File(f.FileStart); tf != nil && caret <= tf.Size() {
+		StripBodies(f, tf.Pos(caret))
+	}
 	for _, d := range orig.Decls {
 		if d == encl {
 			continue
@@ -439,7 +476,7 @@ func buildSnapshotFile(l *Loader, filename string, snap []byte, caret, removed i
 		if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.IMPORT {
 			continue
 		}
-		f.Decls = append(f.Decls, d)
+		f.Decls = append(f.Decls, skeletonDecl(d))
 	}
 	repairs = append(repairs, "decl_splice")
 	return f, l.Fset.File(f.FileStart), repairs
@@ -486,6 +523,97 @@ func NormalizeSlices(r *Record) {
 	if r.SnapshotRepairs == nil {
 		r.SnapshotRepairs = []string{}
 	}
+}
+
+// isGenericCallee reports whether the call's recorded signature may depend on its arguments: functions with their
+// own type parameters, explicit instantiations, and builtins.
+func isGenericCallee(e ast.Expr, info *types.Info) bool {
+	var id *ast.Ident
+	switch x := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		id = x
+	case *ast.SelectorExpr:
+		id = x.Sel
+	case *ast.IndexExpr, *ast.IndexListExpr:
+		return true
+	}
+	if id == nil {
+		return false
+	}
+	if _, ok := info.Uses[id].(*types.Builtin); ok {
+		return true // len/append/make/delete/...: go/types records a signature instantiated from the actual arguments
+	}
+	if f, ok := info.Uses[id].(*types.Func); ok {
+		if s, ok := f.Type().(*types.Signature); ok && s.TypeParams().Len() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func paramName(s *types.Signature, idx int) *string {
+	n := s.Params().Len()
+	if n == 0 {
+		return nil
+	}
+	if idx >= n {
+		if !s.Variadic() {
+			return nil
+		}
+		idx = n - 1
+	}
+	if name := s.Params().At(idx).Name(); name != "" && name != "_" {
+		return sp(name)
+	}
+	return nil
+}
+
+// calleeFunc returns the declared function object of a call's callee (nil for builtins / func values).
+func calleeFunc(e ast.Expr, info *types.Info) *types.Func {
+	var id *ast.Ident
+	switch x := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		id = x
+	case *ast.SelectorExpr:
+		id = x.Sel
+	case *ast.IndexExpr:
+		return calleeFunc(x.X, info)
+	case *ast.IndexListExpr:
+		return calleeFunc(x.X, info)
+	}
+	if id == nil {
+		return nil
+	}
+	f, _ := info.Uses[id].(*types.Func)
+	return f
+}
+
+// cutAfterCaret (strict_prefix on the original engine) drops facts declared in this file at or after the caret.
+func cutAfterCaret(rec *Record, l *Loader, tf *token.File, caret int) {
+	after := func(o types.Object) bool {
+		return o != nil && o.Pos().IsValid() && l.Fset.File(o.Pos()) == tf && tf.Offset(o.Pos()) >= caret
+	}
+	keep := func(fs []Fact) []Fact {
+		out := fs[:0:0]
+		for _, f := range fs {
+			if !after(f.obj) {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	rec.PackageMembers = keep(rec.PackageMembers)
+	rec.ReceiverMembers = keep(rec.ReceiverMembers)
+	rec.Members = keep(rec.Members)
+	var cts []TypeContract
+	for _, ct := range rec.ContextTypes {
+		if after(ct.obj) {
+			continue
+		}
+		ct.Members = keep(ct.Members)
+		cts = append(cts, ct)
+	}
+	rec.ContextTypes = cts
 }
 
 func isFileScope(pkg *types.Package, s *types.Scope) bool { return s.Parent() == pkg.Scope() }
@@ -624,8 +752,8 @@ func membersOf(t types.Type, pkg *types.Package, q types.Qualifier, max int, tru
 
 // expectedFromPrefix infers the expected type from tokens before the caret on the caret's statement:
 // return position (enclosing results), call argument (callee signature parameter), assignment (left-hand side).
-func expectedFromPrefix(rec *Record, file *ast.File, info *types.Info, snap []byte, caret int, tf *token.File,
-	sig *types.Signature, q types.Qualifier) {
+func expectedFromPrefix(l *Loader, rec *Record, file *ast.File, info *types.Info, snap []byte, caret int, tf *token.File,
+	sig *types.Signature, q types.Qualifier, declaredOnly bool) {
 	ls := caret
 	for ls > 0 && snap[ls-1] != '\n' {
 		ls--
@@ -689,9 +817,26 @@ func expectedFromPrefix(rec *Record, file *ast.File, info *types.Info, snap []by
 				return
 			}
 			cs := info.Types[callee].Type.Underlying().(*types.Signature)
+			if declaredOnly && isGenericCallee(callee, info) {
+				// On the full original file the recorded signature of a generic function or builtin is instantiated
+				// from ALL arguments, including those in the hidden target. Only the declared (uninstantiated)
+				// signature of a generic function is emitted, and no expected type; builtins get nothing.
+				f := calleeFunc(callee, info)
+				if f == nil {
+					return
+				}
+				idx := commas
+				rec.CallName = sp(types.ExprString(callee))
+				rec.CallSignature = sp(strings.TrimPrefix(types.TypeString(f.Type(), q), "func"))
+				rec.ArgumentIndex = &idx
+				rec.ParameterName = paramName(f.Type().(*types.Signature), idx)
+				return
+			}
+			rec.CallName = sp(types.ExprString(callee)) // source text before the '(' (prefix only)
 			rec.CallSignature = sp(strings.TrimPrefix(types.TypeString(cs, q), "func"))
 			idx := commas
 			rec.ArgumentIndex = &idx
+			rec.ParameterName = paramName(cs, idx)
 			n := cs.Params().Len()
 			var pt types.Type
 			switch {
@@ -744,18 +889,26 @@ func expectedFromPrefix(rec *Record, file *ast.File, info *types.Info, snap []by
 					lhsT = tv.Type
 				}
 			}
-			if vs, ok := n.(*ast.ValueSpec); ok && vs.Type != nil && len(vs.Names) == 1 && vs.Type.End() < eq {
-				if tv, ok := info.Types[vs.Type]; ok && tv.Type.String() != "" {
-					lhsT = tv.Type
+			// `var x T = ▮`: the '=' directly follows the declared type of this spec
+			if vs, ok := n.(*ast.ValueSpec); ok && vs.Type != nil && len(vs.Names) == 1 && vs.Type.End() <= eq &&
+				l.Fset.File(vs.Type.End()) == tf {
+				if a, b := tf.Offset(vs.Type.End()), tf.Offset(eq); a <= b && strings.TrimSpace(string(snap[a:b])) == "" {
+					if tv, ok := info.Types[vs.Type]; ok {
+						lhsT = tv.Type
+					}
 				}
 			}
 			return true
 		})
 		if lhsT != nil && validType(lhsT) {
 			rec.ExpectedType = sp(types.TypeString(lhsT, q))
-			rec.ExpectedTypeSource = sp("assignment")
+			rec.ExpectedTypeSource = sp("initializer")
+			if !strings.HasPrefix(strings.TrimSpace(string(snap[ls:caret])), "var ") {
+				rec.ExpectedTypeSource = sp("assignment")
+			}
 		}
 	}
+	return
 }
 
 // contextTypes: contracts of repository-defined named types reachable from in-scope facts (never from the target).
@@ -814,7 +967,7 @@ func contextTypes(rec *Record, pkg *types.Package, scope *types.Scope, pos token
 		for _, name := range s.Names() {
 			obj := s.Lookup(name)
 			if v, ok := obj.(*types.Var); ok && obj.Pos() < pos {
-				if _, o := scope.LookupParent(name, pos); o == obj {
+				if _, o := scope.LookupParent(name, pos-1); o == obj {
 					addT(v.Type(), "local_or_parameter", 0)
 				}
 			}
@@ -842,7 +995,7 @@ func contextTypes(rec *Record, pkg *types.Package, scope *types.Scope, pos token
 			mem = []Fact{}
 		}
 		out = append(out, TypeContract{Name: types.TypeString(c.t, q), Kind: kindOfType(c.t), Source: c.source,
-			Members: mem, TotalMembers: total})
+			Members: mem, TotalMembers: total, obj: c.t.Obj()})
 		if len(out) >= lim.maxTypes {
 			break
 		}
@@ -866,7 +1019,8 @@ func sameModule(a, b string) bool {
 //
 // Facts declared in other packages (std, other repository packages, vendor) come from separately type-checked
 // packages that never saw the snapshot, so overlap with the target is legitimate coverage ("mentioned").
-func audit(rec *Record, l *Loader, pkg *types.Package, file *ast.File, tf *token.File, caret int, target, policy string, info *types.Info) {
+func audit(rec *Record, l *Loader, pkg *types.Package, file *ast.File, tf *token.File, caret int, target, policy string,
+	info *types.Info, identPresent func(string) bool) {
 	tids := map[string]bool{}
 	var s scanner.Scanner
 	fs := token.NewFileSet()
@@ -881,25 +1035,29 @@ func audit(rec *Record, l *Loader, pkg *types.Package, file *ast.File, tf *token
 			tids[lit] = true
 		}
 	}
-	snapIdents := map[string]bool{}
-	for id := range info.Defs {
-		snapIdents[id.Name] = true
-	}
-	for id := range info.Uses {
-		snapIdents[id.Name] = true
-	}
-	ast.Inspect(file, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok {
+	present := identPresent
+	if present == nil {
+		snapIdents := map[string]bool{}
+		for id := range info.Defs {
 			snapIdents[id.Name] = true
 		}
-		return true
-	})
+		for id := range info.Uses {
+			snapIdents[id.Name] = true
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				snapIdents[id.Name] = true
+			}
+			return true
+		})
+		present = func(n string) bool { return snapIdents[n] }
+	}
 	var mentioned, violations []string
 	check := func(facts []Fact, local bool) {
 		for _, fct := range facts {
 			if tids[fct.Name] {
 				mentioned = append(mentioned, fct.Name)
-				if fct.obj != nil && fct.obj.Pkg() == pkg && !snapIdents[fct.Name] {
+				if fct.obj != nil && fct.obj.Pkg() == pkg && !present(fct.Name) {
 					violations = append(violations, "name_only_in_target:"+fct.Name)
 				}
 			}

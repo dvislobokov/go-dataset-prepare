@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +27,9 @@ type RunOptions struct {
 	Workers      int
 	Overwrite    bool
 	Corpus       bool
+	CorpusOnly   bool // corpus pass: discovery + corpus.jsonl, no caret extraction
 	Gzip         bool
-	SemanticHook func(dir string, cfg *Config, repo *RepoInfo) (map[string]int, error) // optional semantic pass
+	SemanticHook func(dir string, cfg *Config, repo *RepoInfo, workers int) (map[string]int, error) // optional semantic pass
 	CommandLine  []string
 }
 
@@ -62,6 +64,17 @@ func NewJSONLWriter(path string, gz bool) (*JSONLWriter, error) {
 }
 
 func (j *JSONLWriter) Write(v any) error { j.N++; return j.enc.Encode(v) }
+
+// Flush pushes buffered complete lines to the file (gzip: a sync flush), so an interrupted run can be salvaged.
+func (j *JSONLWriter) Flush() error {
+	if err := j.w.Flush(); err != nil {
+		return err
+	}
+	if j.gz != nil {
+		return j.gz.Flush()
+	}
+	return nil
+}
 
 func (j *JSONLWriter) Close() error {
 	if err := j.w.Flush(); err != nil {
@@ -267,7 +280,12 @@ func Run(opt RunOptions) (map[string]any, error) {
 			defer wg.Done()
 			for j := range jobs {
 				st := time.Now()
-				r := ext.Extract(j.af)
+				var r *FileResult
+				if opt.CorpusOnly {
+					r = &FileResult{Rel: j.af.Rel, Counters: map[string]int{}, Corpus: ext.corpus(j.af)}
+				} else {
+					r = ext.Extract(j.af)
+				}
 				results <- result{j.seq, r, time.Since(st)}
 			}
 		}()
@@ -277,6 +295,8 @@ func Run(opt RunOptions) (map[string]any, error) {
 	pending := map[int]result{}
 	next := 0
 	seenDedup := map[string]bool{}
+	seedStr := strconv.FormatInt(cfg.Seed, 10)
+	written := 0
 	var latencies []float64
 	writeStart := time.Duration(0)
 	for r := range results {
@@ -303,17 +323,24 @@ func Run(opt RunOptions) (map[string]any, error) {
 					}
 					seenDedup[x.r.DedupKeys[i]] = true
 				}
+				// repository-wide deterministic thinning (bulk mode): hash of the content-derived id, independent of
+				// path order and worker count; test code can be thinned separately to cap its share
+				keep := cfg.Sampling.KeepFraction
+				if s.IsTest {
+					keep *= cfg.Sampling.TestKeepFraction
+				}
+				if keep < 1.0 && Uniform(seedStr, "keep", s.SampleID) >= keep {
+					if s.IsTest {
+						counters["samples.dropped_thinning_test"]++
+					} else {
+						counters["samples.dropped_thinning"]++
+					}
+					continue
+				}
 				if err := samples.Write(s); err != nil {
 					return nil, err
 				}
-				counters["samples.total"]++
-				counters["samples.kind."+s.CaretKind]++
-				if s.IsTest {
-					counters["samples.test_code"]++
-				}
-				for _, f := range s.QualityFlags {
-					counters["samples.flag."+f]++
-				}
+				written++
 			}
 			for _, ex := range x.r.Exclusions {
 				_ = excl.Write(ex)
@@ -338,10 +365,21 @@ func Run(opt RunOptions) (map[string]any, error) {
 			}
 		}
 	}
+	if n := cfg.Sampling.MaxSamplesPerRepo; n > 0 && written > n {
+		// keep the n samples with the smallest hash rank repository-wide (unbiased by path order), source order kept
+		dropped, err := capSamples(filepath.Join(tmp, "samples.jsonl"), gzipOut, seedStr, n)
+		if err != nil {
+			return nil, err
+		}
+		counters["samples.dropped_repo_cap"] += dropped
+	}
+	if err := countSamples(filepath.Join(tmp, "samples.jsonl"), counters); err != nil {
+		return nil, err
+	}
 	semCounters := map[string]int{}
-	if opt.SemanticHook != nil && cfg.Semantic.Mode != "none" {
+	if opt.SemanticHook != nil && cfg.Semantic.Mode != "none" && !opt.CorpusOnly {
 		st := time.Now()
-		sc, err := opt.SemanticHook(tmp, &cfg, repo)
+		sc, err := opt.SemanticHook(tmp, &cfg, repo, opt.Workers)
 		timer.add("semantic", time.Since(st))
 		if err != nil {
 			return nil, fmt.Errorf("semantic: %w", err)
@@ -416,6 +454,7 @@ func Run(opt RunOptions) (map[string]any, error) {
 		}
 	}
 	manifest["outputs"] = checksums
+	manifest["counters"] = counters // also in summary.json; here for orchestrators reading one file
 	if err := writeJSON(filepath.Join(tmp, "run-manifest.json"), manifest); err != nil {
 		return nil, err
 	}
@@ -432,6 +471,94 @@ func Run(opt RunOptions) (map[string]any, error) {
 	}
 	ok = true
 	return manifest, nil
+}
+
+// capSamples rewrites a samples file keeping the n samples with the smallest uniform(seed, "repo_cap", id).
+func capSamples(path string, gz bool, seed string, n int) (int, error) {
+	readAll := func() ([][]byte, error) {
+		rc, err := OpenJSONL(path)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		var lines [][]byte
+		sc := bufio.NewScanner(rc)
+		sc.Buffer(make([]byte, 1<<20), 1<<28)
+		for sc.Scan() {
+			lines = append(lines, append([]byte{}, sc.Bytes()...))
+		}
+		return lines, sc.Err()
+	}
+	lines, err := readAll()
+	if err != nil || len(lines) <= n {
+		return 0, err
+	}
+	type rk struct {
+		u float64
+		i int
+	}
+	ranks := make([]rk, len(lines))
+	for i, l := range lines {
+		var s struct {
+			ID string `json:"sample_id"`
+		}
+		if err := json.Unmarshal(l, &s); err != nil {
+			return 0, err
+		}
+		ranks[i] = rk{Uniform(seed, "repo_cap", s.ID), i}
+	}
+	sort.Slice(ranks, func(a, b int) bool {
+		return ranks[a].u < ranks[b].u || ranks[a].u == ranks[b].u && ranks[a].i < ranks[b].i
+	})
+	keep := make([]bool, len(lines))
+	for _, r := range ranks[:n] {
+		keep[r.i] = true
+	}
+	if gz {
+		_ = os.Remove(path)
+	}
+	w, err := NewJSONLWriter(path, gz)
+	if err != nil {
+		return 0, err
+	}
+	for i, l := range lines {
+		if keep[i] {
+			if err := w.Write(json.RawMessage(l)); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return len(lines) - n, w.Close()
+}
+
+// countSamples (re)computes the samples.* counters from the final samples file.
+func countSamples(path string, c map[string]int) error {
+	rc, err := OpenJSONL(path)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	sc := bufio.NewScanner(rc)
+	sc.Buffer(make([]byte, 1<<20), 1<<28)
+	for sc.Scan() {
+		var s struct {
+			Kind  string   `json:"caret_kind"`
+			Test  bool     `json:"is_test"`
+			Flags []string `json:"quality_flags"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &s); err != nil {
+			return err
+		}
+		c["samples.total"]++
+		c["samples.kind."+s.Kind]++
+		if s.Test {
+			c["samples.test_code"]++
+		}
+		for _, f := range s.Flags {
+			c["samples.flag."+f]++
+		}
+	}
+	return sc.Err()
 }
 
 func pct(sorted []float64, p float64) float64 {

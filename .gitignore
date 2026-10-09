@@ -19,3 +19,4 @@ artifacts/benchmarks/*
 # search progress log (not the data)
 data/go-search.jsonl.queries.log
 data/go-search.log
+.venv/

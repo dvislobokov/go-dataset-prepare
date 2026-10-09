@@ -1,9 +1,13 @@
-# Scale plan: ~34,000 Go repositories (design; not executed)
+# Scale plan: bulk Go run
 
-Nothing in this phase downloads or processes a bulk list. This stage ships the metadata-only selection
-(`data/selection/`) and the per-repository pipeline, which is already deterministic, bounded and atomic at the
-output-directory level. The interfaces below preserve compatibility; the bulk downloader is built only on explicit
-request.
+Stage 2 adds the bulk orchestrator `scripts/goflc_run.py` (explicitly requested), adapted from the C# `flc_run.py`:
+resumable SQLite state, GraphQL metadata prefetch (fork/archived/default branch), sparse shallow blobless clone with
+the token passed via environment, syntax pass → repository-wide thinning → semantic pass under a timeout/RSS
+watchdog, partial salvage / syntax fallback, `validate`, `render`, Parquet per repository in a subprocess,
+cross-repository exact-file dedup, batched idempotent Hugging Face upload in a separate thread, smallest-first plus a
+big lane, deletion of each checkout, a `--corpus-only` pass and a README with real examples. It has been dry-run
+locally on 3 repositories (`--no-upload`); the bulk run itself is deployed and started by the user
+(`docs/DEPLOY.md`). The design notes below remain the contract.
 
 ## Workflow
 

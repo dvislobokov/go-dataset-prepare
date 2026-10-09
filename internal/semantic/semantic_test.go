@@ -396,3 +396,110 @@ func TestEndToEndFixtureSemantic(t *testing.T) {
 		t.Error("no resolved records")
 	}
 }
+
+// atOriginal analyzes the caret with the cached original-package engine (editor_snapshot). ok=false when the caret
+// is not eligible (outside a function body).
+func atOriginal(t *testing.T, files map[string]string) (*Record, bool) {
+	t.Helper()
+	dir := t.TempDir()
+	var rel string
+	var caret, te int
+	var src []byte
+	for name, content := range files {
+		if i := strings.Index(content, caretMark); i >= 0 {
+			rel = name
+			content = content[:i] + content[i+len(caretMark):]
+			caret = i
+			e := caret + strings.IndexByte(content[caret:]+"\n", '\n')
+			te = flc.TrimRightHSpace([]byte(content), caret, e)
+			src = []byte(content)
+		}
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(content), 0o644)
+	}
+	mod := "example.com/m"
+	l := NewLoader(dir, &mod, "linux", "amd64", nil, true)
+	abs := filepath.Join(dir, filepath.FromSlash(rel))
+	pf, _ := l.ListDir(filepath.Dir(abs))
+	relDir, _ := filepath.Rel(dir, filepath.Dir(abs))
+	op := l.checkOriginal(l.ImportPathOf(filepath.ToSlash(relDir)), append(append([]string{}, pf.GoFiles...), pf.TestGoFiles...))
+	rec := &Record{SchemaVersion: "flc-semantic/v1", VisibilityPolicy: "editor_snapshot"}
+	NormalizeSlices(rec)
+	ok := analyzeOriginal(l, rec, op, abs, src, caret, string(src[caret:te]), "editor_snapshot",
+		limits{maxScope: 100, maxMembers: 100, maxTypes: 6, maxTypeMembers: 10})
+	return rec, ok
+}
+
+func TestOriginalEngineLeakageRules(t *testing.T) {
+	mod := "module example.com/m\n"
+	// local declared in the target
+	r, ok := atOriginal(t, map[string]string{"go.mod": mod, "a.go": "package a\n\nfunc f(a int) int {\n\tb := a + 1\n\t▮secretLocalName := b * 2\n\treturn secretLocalName\n}\n"})
+	if !ok || r.AnalysisEngine != "original_scope" {
+		t.Fatal("caret in a function body must use original_scope")
+	}
+	if _, bad := names(r.Locals)["secretLocalName"]; bad || names(r.Locals)["b"] != "int" {
+		t.Fatalf("locals %v", names(r.Locals))
+	}
+	// declarator being typed is never in scope (both engines)
+	files := map[string]string{"go.mod": mod, "a.go": "package a\n\ntype Client struct{ N int }\n\nfunc f() {\n\tclient1 := &Cl▮ient{N: 1}\n\t_ = client1\n}\n"}
+	r, _ = atOriginal(t, files)
+	if _, bad := names(r.Locals)["client1"]; bad {
+		t.Fatal("original engine: declarator being typed is visible")
+	}
+	if _, bad := names(at(t, files, "editor_snapshot").Locals)["client1"]; bad {
+		t.Fatal("snapshot engine: declarator being typed is visible")
+	}
+	// invocation only in the target
+	r, _ = atOriginal(t, map[string]string{"go.mod": mod, "a.go": "package a\n\ntype T struct{}\n\nfunc (T) Known() {}\n\nfunc g(x T) {\n\tx.▮Known()\n\tundefinedOnlyHere()\n}\n"})
+	if _, ok := names(r.Members)["Known"]; !ok || len(r.Leakage.Violations) != 0 {
+		t.Fatalf("members %v leakage %+v", names(r.Members), r.Leakage)
+	}
+}
+
+func TestOriginalEngineGenericAndBuiltinCallsDoNotLeakInstantiation(t *testing.T) {
+	mod := "module example.com/m\n"
+	// the generic callee is instantiated from the hidden argument on the full file: only the declared signature
+	r, ok := atOriginal(t, map[string]string{"go.mod": mod, "a.go": `package a
+
+func Map[T, U any](xs []T, f func(T) U) []U { return nil }
+
+func g(xs []int) {
+	_ = Map(xs, ▮func(x int) string { return "" })
+}
+`})
+	if !ok {
+		t.Fatal("not eligible")
+	}
+	if r.ExpectedType != nil {
+		t.Fatalf("expected type leaked from target instantiation: %s", *r.ExpectedType)
+	}
+	if r.CallSignature == nil || !strings.Contains(*r.CallSignature, "U") || strings.Contains(*r.CallSignature, "string") {
+		t.Fatalf("call signature must be the declared generic one, got %v", r.CallSignature)
+	}
+	// builtin: len(...)'s recorded signature is derived from its argument
+	r, _ = atOriginal(t, map[string]string{"go.mod": mod, "a.go": "package a\n\ntype Secret []int\n\nfunc g(s Secret) int {\n\treturn len(▮s)\n}\n"})
+	if r.ExpectedType != nil && *r.ExpectedType == "Secret" {
+		t.Fatal("builtin argument type leaked")
+	}
+	if r.CallSignature != nil {
+		t.Fatalf("builtin call signature emitted: %s", *r.CallSignature)
+	}
+}
+
+func TestOriginalEngineNotUsedOutsideBodies(t *testing.T) {
+	_, ok := atOriginal(t, map[string]string{"go.mod": "module example.com/m\n", "a.go": "package a\n\ntype T struct {\n\t▮Name string\n}\n"})
+	if ok {
+		t.Fatal("package-level caret must fall back to the snapshot engine")
+	}
+}
+
+func TestQuarantineLeak(t *testing.T) {
+	r := &Record{SchemaVersion: "flc-semantic/v1", SampleID: "x", VisibilityPolicy: "editor_snapshot", Status: "resolved",
+		Locals: []Fact{{Name: "leaky", Kind: "local"}}, Leakage: Leakage{TargetIdentifiers: []string{"leaky"},
+			Violations: []string{"name_only_in_target:leaky"}}}
+	quarantineLeak(r)
+	if r.Status != "failed" || *r.Reason != "leak_audit:leaky" || len(r.Locals) != 0 || len(r.Leakage.Violations) != 0 {
+		t.Fatalf("%+v", r)
+	}
+}

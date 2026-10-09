@@ -210,6 +210,9 @@ func Validate(dataset, repo string) (*ValidationReport, error) {
 	if err := validateSemantic(dataset, ids, rep, fail); err != nil {
 		return nil, err
 	}
+	if err := validateCorpus(dataset, repo, rep, fail); err != nil {
+		return nil, err
+	}
 	rep.OK = len(rep.Failures) == 0
 	return rep, nil
 }
@@ -248,6 +251,39 @@ func validateSemantic(dataset string, ids map[string]bool, rep *ValidationReport
 			fail("semantic_leakage", fmt.Sprintf("%s/%s: %v", r.SampleID, r.VisibilityPolicy, r.Leakage.Violations))
 		}
 		rep.Checks["semantic_leakage_audit"]++
+	}
+	return sc.Err()
+}
+
+// validateCorpus checks every corpus record against the repository bytes: sha256 of the original bytes and exact
+// content (BOM + content == file bytes).
+func validateCorpus(dataset, repo string, rep *ValidationReport, fail func(string, string)) error {
+	rc, err := OpenJSONL(filepath.Join(dataset, "corpus.jsonl"))
+	if err != nil {
+		return nil // no corpus
+	}
+	defer rc.Close()
+	sc := bufio.NewScanner(rc)
+	sc.Buffer(make([]byte, 1<<20), 1<<28)
+	for sc.Scan() {
+		var c CorpusFile
+		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
+			fail("corpus_json", err.Error())
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(repo, filepath.FromSlash(c.RelativePath)))
+		if err != nil {
+			fail("corpus_source_missing", c.RelativePath)
+			continue
+		}
+		bom := ""
+		if c.HasBOM {
+			bom = "\xEF\xBB\xBF"
+		}
+		if Sha256Hex(b) != c.Sha256 || bom+c.Content != string(b) || c.Bytes != len(b) || c.Language != "go" {
+			fail("corpus_content", c.RelativePath)
+		}
+		rep.Checks["corpus"]++
 	}
 	return sc.Err()
 }

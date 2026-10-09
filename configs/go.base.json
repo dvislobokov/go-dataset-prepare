@@ -86,7 +86,10 @@
     "min_target_chars": 1,
     "max_target_chars": 200,
     "trivial_target_keep_probability": 0.05,
-    "exclusion_examples_per_reason": 25
+    "exclusion_examples_per_reason": 25,
+    "keep_fraction": 1,
+    "test_keep_fraction": 1,
+    "max_samples_per_repo": 0
   },
   "context": {
     "left_chars": 6000,
@@ -106,7 +109,8 @@
     "max_scope_symbols": 48,
     "max_members": 48,
     "max_package_files": 400,
-    "use_vendor": true
+    "use_vendor": true,
+    "engine": "auto"
   },
   "secrets": {
     "patterns": [

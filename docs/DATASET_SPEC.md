@@ -11,7 +11,8 @@ All outputs of one run live in one directory, written atomically (`<out>.tmp-<pi
 | `exclusions.jsonl` | `flc-exclusion/v1` | audit examples of excluded carets/lines (capped per reason; full counts in `summary.json`) |
 | `summary.json` | deterministic counters (byte-identical across reruns) | the run |
 | `run-manifest.json` | [`run-manifest.v1`](../schemas/run-manifest.v1.schema.json) | provenance, config, environment, timings, resources, output checksums |
-| `validation.json` | written by `validate` | check counts and failures |
+| `validation.json` | written by `validate` | check counts and failures (samples, semantic leakage, corpus bytes) |
+| `prompts/prompts.<split>.jsonl` | `flc-train/v1` (`goflc render`) | model-facing prompt/completion pair, see PROMPT_FORMAT.md |
 
 `--gzip` writes `*.jsonl.gz`; readers accept both.
 
@@ -58,5 +59,7 @@ appears in two splits.
 ## Semantic sidecar
 
 Keyed by `(sample_id, visibility_policy)`; status ∈ `resolved | partially_resolved | syntax_fallback | failed` with
-a reason code. See `docs/EXTRACTION_RULES.md` §semantic and the schema. The sample's own
+a reason code (`leak_audit:<names>` = facts removed because the per-record leakage audit failed);
+`analysis_engine` ∈ `original_scope | snapshot_typecheck`. See `docs/EXTRACTION_RULES.md` (semantic engines) and the
+schema. The sample's own
 `semantic_status`/`semantic_reason` mirror the `editor_snapshot` result (or `not_attempted`).

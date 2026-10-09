@@ -67,6 +67,12 @@ type SamplingConfig struct {
 	MaxTargetChars               int                `json:"max_target_chars"`
 	TrivialTargetKeepProbability float64            `json:"trivial_target_keep_probability"`
 	ExclusionExamplesPerReason   int                `json:"exclusion_examples_per_reason"`
+	// Bulk mode (set per repository by the orchestrator from a syntax pass): after dataset-level dedup a sample is
+	// kept iff uniform(seed, "keep", sample_id) < keep_fraction (x test_keep_fraction for test code); then at most
+	// max_samples_per_repo samples with the smallest uniform(seed, "repo_cap", sample_id) are kept (0 = no cap).
+	KeepFraction      float64 `json:"keep_fraction"`
+	TestKeepFraction  float64 `json:"test_keep_fraction"`
+	MaxSamplesPerRepo int     `json:"max_samples_per_repo"`
 }
 
 type ContextConfig struct {
@@ -89,6 +95,9 @@ type SemanticConfig struct {
 	MaxPackageFiles int      `json:"max_package_files"`
 	// Resolve imports through ./vendor (read-only parse) when present.
 	UseVendor bool `json:"use_vendor"`
+	// auto: original_scope (cached original package) for carets inside function bodies, snapshot_typecheck otherwise
+	// and as fallback; snapshot: always re-check the target-free snapshot (reference engine).
+	Engine string `json:"engine"`
 }
 
 type SecretsConfig struct {
@@ -138,12 +147,14 @@ func DefaultConfig() Config {
 			MaxTargetChars:               200,
 			TrivialTargetKeepProbability: 0.05,
 			ExclusionExamplesPerReason:   25,
+			KeepFraction:                 1.0,
+			TestKeepFraction:             1.0,
 		},
 		Context: ContextConfig{LeftChars: 6000, RightChars: 1000},
 		Split:   SplitConfig{RepositorySplit: "train"},
 		Semantic: SemanticConfig{
 			Mode: "none", Policies: []string{"editor_snapshot", "strict_prefix"}, SubsetFraction: 1.0,
-			MaxScopeSymbols: 48, MaxMembers: 48, MaxPackageFiles: 400, UseVendor: true,
+			MaxScopeSymbols: 48, MaxMembers: 48, MaxPackageFiles: 400, UseVendor: true, Engine: "auto",
 		},
 		Secrets: SecretsConfig{
 			Patterns: []string{
@@ -199,6 +210,17 @@ func (c *Config) Validate() error {
 	case "keep_tagged", "skip":
 	default:
 		return fmt.Errorf("discovery.build_excluded_policy must be keep_tagged|skip")
+	}
+	if c.Sampling.KeepFraction < 0 || c.Sampling.KeepFraction > 1 || c.Sampling.TestKeepFraction < 0 || c.Sampling.TestKeepFraction > 1 {
+		return fmt.Errorf("sampling.keep_fraction/test_keep_fraction must be in [0,1]")
+	}
+	switch c.Semantic.Engine {
+	case "", "auto", "snapshot":
+	default:
+		return fmt.Errorf("semantic.engine must be auto|snapshot")
+	}
+	if c.Semantic.Engine == "" {
+		c.Semantic.Engine = "auto"
 	}
 	switch c.Semantic.Mode {
 	case "none", "best_effort", "required":

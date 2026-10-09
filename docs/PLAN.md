@@ -1,7 +1,8 @@
 # Go Full-Line Completion dataset pipeline — architecture & plan
 
-Status: **stage 1 implemented and running end to end** (discovery + syntax extraction + semantic prototype +
-validation + benchmark, tested on synthetic fixtures and a 2-repo pilot). Modeled on the C# / Roslyn pipeline in
+Status: **stage 2** — stage 1 (discovery + syntax extraction + semantic prototype + validation + benchmark) plus a
+fast cached semantic engine (5–7× single-thread, 10–12× with 8 workers on the bulk config), `goflc render`
+(`flc-prompt/v2`), bulk-mode options and the bulk orchestrator `scripts/goflc_run.py` (dry-run locally). Modeled on the C# / Roslyn pipeline in
 `/data/dataset-test`; this document records what was carried over, what is Go-specific, and what comes next.
 
 ## 1. Mission and scope
@@ -119,7 +120,13 @@ a selector) and **decl_splice** (editor_snapshot only: the parser's error recove
 swallow the following top-level declarations, so every declaration except the edited one is taken from the parsed
 original file — drop-only use of the original, analogous to the C# "recovery artifacts" rule).
 
-Status: `resolved | partially_resolved (reason) | syntax_fallback (reason) | failed (reason)`. External modules are
+Engines (stage 2): `original_scope` reads facts from the cached type-checked original package for editor_snapshot
+carets inside function bodies (scopes start after the declaring statement, so nothing in the hidden target is
+visible; generic/builtin calls report only declared signatures); `snapshot_typecheck` checks the snapshot with all
+other function bodies stripped for the rest and for strict_prefix. See `docs/EXTRACTION_RULES.md`.
+
+Status: `resolved | partially_resolved (reason) | syntax_fallback (reason) | failed (reason)`; a record failing the
+leakage audit becomes `failed` / `leak_audit:<names>` without facts. External modules are
 not downloaded, so package-heavy code degrades to `partially_resolved` with `external_imports_unresolved` /
 `unresolved_import` rather than inventing facts.
 
@@ -172,10 +179,9 @@ sandboxed trusted tier for eligible ones. No bulk downloader is built in this ph
 
 ## 11. Risks / open decisions
 
-- **Semantic cost & memory.** Full `go/types` per-package re-checking is ~150 samples/s and ~1–1.4 GB RSS on the
-  pilot (stdlib source parsing dominates). For scale: cache per-package base compilations and bind the edited
-  snapshot incrementally (the Go analog of Roslyn speculative binding), and/or restrict to `member_access` /
-  `argument_list` / `error_handling` carets where facts matter most. Measured and flagged in `docs/BENCHMARKS.md`.
+- **Semantic cost & memory** (addressed in stage 2): cached original-package engine + body-less imports + stripped
+  snapshot checks; remaining costs are the per-process stdlib load and the snapshot fallback for package-level
+  carets (`docs/BENCHMARKS.md`).
 - **External imports unresolved offline** → many `partially_resolved`. Honest and reason-coded; a sandboxed trusted
   tier with a module mirror would raise `resolved` rates (future).
 - **Build-constraint matrix.** Only one GOOS/GOARCH is analyzed per run; `build_excluded` files get syntax samples
@@ -188,7 +194,10 @@ sandboxed trusted tier for eligible ones. No bulk downloader is built in this ph
 1. **(done)** Discovery + filters, caret strata, JSONL + schemas, exact-reconstruction validator, unit tests,
    candidate search + selection, Go toolchain install, syntax benchmark, 2-repo pilot.
 2. **(done, prototype)** Semantic facts with go/types, two visibility policies, leakage audit + hard tests.
-3. Semantic performance (per-package compilation cache / incremental binding); `render` step producing the
-   model-facing `flc-prompt` with an `<|eol|>` stop token; TYPE-budget study.
-4. Scale interfaces: manifest reader, job store, group splitter, shard writer + run index (code + tests only).
-5. On explicit request: bulk ingestion of the 34k manifest in a sandbox.
+3. **(done)** Semantic performance (cached original scope, stripped bodies, parallel chunks); `goflc render`
+   (`flc-prompt/v2`, `<|eol|>` stop token); bulk thinning options; leak-audit quarantine.
+4. **(done, dry-run)** Bulk orchestrator `scripts/goflc_run.py` → HF `dvislobokov/go-ml-complation`
+   (`docs/DEPLOY.md`); the server run is started by the user.
+5. Next: long-lived worker sharing the stdlib across repositories; fast engine for safe package-level carets;
+   TYPE-budget study; MinHash near-duplicate grouping across repositories; optional `package_members` line in
+   the prompt.

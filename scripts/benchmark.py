@@ -95,6 +95,7 @@ def main():
     syntax = cfg_with()
     subset = cfg_with(**{"semantic.subset_fraction": args.subset})
     full = cfg_with()
+    editor = cfg_with(**{"semantic.policies": ["editor_snapshot"]})  # bulk configuration
 
     results = {"generator": "scripts/benchmark.py", "bin": BIN, "repos": {}, "experiments": {}}
     for repo in args.repo:
@@ -127,6 +128,11 @@ def main():
         rr["E2_semantic_subset"] = row(man, validate(o, repo)) if man else {"status": "skipped", "reason": err}
         if man:
             rr["E2_semantic_subset"]["semantic_counters"] = {k: v for k, v in man["semantic"].items()}
+        # E3e full semantic, editor_snapshot only (the bulk-run configuration), sequential and parallel
+        for tag, w in (("E3e_semantic_editor_seq", 1), ("E3e_semantic_editor_par", args.workers)):
+            o = os.path.join(scratch, name + "-" + tag)
+            man, err = extract(repo, o, editor, w, "best_effort")
+            rr[tag] = row(man, validate(o, repo)) if man else {"status": "skipped", "reason": err}
         # E3 full semantic
         o = os.path.join(scratch, name + "-sem3")
         man, err = extract(repo, o, full, args.workers, "best_effort")
@@ -165,7 +171,8 @@ def write_md(res, path):
         L.append("")
         L.append("| experiment | workers | wall ms | samples/s | MiB/s | peak RSS MB | validate | sem records |")
         L.append("| --- | ---: | ---: | ---: | ---: | ---: | :---: | ---: |")
-        for ek in ("E1_syntax_seq", "E1_syntax_par", "E2_semantic_subset", "E3_semantic_full"):
+        for ek in ("E1_syntax_seq", "E1_syntax_par", "E2_semantic_subset", "E3_semantic_full", "E3e_semantic_editor_seq",
+                   "E3e_semantic_editor_par"):
             r = rr.get(ek, {})
             if r.get("status") != "ok":
                 L.append(f"| {ek} | | | | | | skipped | |")

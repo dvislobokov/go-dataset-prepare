@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type loadedPkg struct {
@@ -36,6 +37,7 @@ type loadedPkg struct {
 
 // Loader type-checks imported packages once per process (per repository run) and caches them.
 type Loader struct {
+	mu         sync.Mutex // guards cache/inProgress/Unresolved/Stats; held for the whole load of an import graph
 	Fset       *token.FileSet
 	ctx        build.Context
 	goroot     string
@@ -122,10 +124,34 @@ func (l *Loader) dirFor(path, fromDir string) (dir string, origin string) {
 
 var errUnresolved = errors.New("unresolved import (offline: external module not available)")
 
-// ImportFrom implements types.ImporterFrom.
+// ImportFrom implements types.ImporterFrom. Safe for concurrent use by many snapshot checks: the cache is locked,
+// and a missing package (with its whole import graph) is loaded while the lock is held.
 func (l *Loader) Import(path string) (*types.Package, error) { return l.ImportFrom(path, "", 0) }
 
 func (l *Loader) ImportFrom(path, fromDir string, _ types.ImportMode) (*types.Package, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.importLocked(path, fromDir)
+}
+
+// lockedImporter is used for checks that run while l.mu is already held (nested imports during a load).
+type lockedImporter struct{ l *Loader }
+
+func (li lockedImporter) Import(path string) (*types.Package, error) {
+	return li.l.importLocked(path, "")
+}
+func (li lockedImporter) ImportFrom(path, fromDir string, _ types.ImportMode) (*types.Package, error) {
+	return li.l.importLocked(path, fromDir)
+}
+
+// Stat increments a loader statistic (thread-safe).
+func (l *Loader) Stat(k string, n int) {
+	l.mu.Lock()
+	l.Stats[k] += n
+	l.mu.Unlock()
+}
+
+func (l *Loader) importLocked(path, fromDir string) (*types.Package, error) {
 	if path == "unsafe" {
 		return types.Unsafe, nil
 	}
@@ -149,14 +175,16 @@ func (l *Loader) ImportFrom(path, fromDir string, _ types.ImportMode) (*types.Pa
 	l.inProgress[key] = true
 	defer delete(l.inProgress, key)
 	l.Stats["packages_loaded_"+origin]++
-	files, _, err := l.parseDir(dir, false)
+	// Imported packages are only needed for their declarations: function bodies are dropped before checking
+	// (what export data would contain). This is the main load-time and memory saving.
+	files, _, err := l.parseDir(dir, false, true)
 	if err != nil && len(files) == 0 {
 		lp := &loadedPkg{err: err}
 		l.cache[key] = lp
 		return nil, err
 	}
 	nerr := 0
-	conf := types.Config{Importer: l, Error: func(error) { nerr++ }, FakeImportC: true}
+	conf := types.Config{Importer: lockedImporter{l}, Error: func(error) { nerr++ }, FakeImportC: true}
 	pkg, _ := conf.Check(path, l.Fset, files, nil)
 	if pkg != nil {
 		pkg.MarkComplete()
@@ -205,7 +233,7 @@ func (l *Loader) ListDir(dir string) (*PkgFiles, error) {
 	return pf, nil
 }
 
-func (l *Loader) parseDir(dir string, withTests bool) ([]*ast.File, *PkgFiles, error) {
+func (l *Loader) parseDir(dir string, withTests, stripBodies bool) ([]*ast.File, *PkgFiles, error) {
 	pf, err := l.ListDir(dir)
 	if pf == nil {
 		return nil, nil, err
@@ -218,6 +246,9 @@ func (l *Loader) parseDir(dir string, withTests bool) ([]*ast.File, *PkgFiles, e
 	for _, n := range names {
 		f, perr := parser.ParseFile(l.Fset, n, nil, parser.SkipObjectResolution)
 		if f != nil {
+			if stripBodies {
+				StripBodies(f, token.NoPos)
+			}
 			files = append(files, f)
 		}
 		_ = perr
@@ -225,15 +256,42 @@ func (l *Loader) parseDir(dir string, withTests bool) ([]*ast.File, *PkgFiles, e
 	return files, pf, nil
 }
 
-// ParseFiles parses the given absolute paths once (shared FileSet) for reuse across many snapshot checks.
+// ParseFiles parses the given absolute paths once (shared FileSet) for reuse across many snapshot checks. The other
+// files of the analyzed package are only needed for package-level declarations, so their function bodies are dropped
+// (the edited function is the only body re-bound per caret).
 func (l *Loader) ParseFiles(paths []string) map[string]*ast.File {
 	out := map[string]*ast.File{}
 	for _, p := range paths {
 		if f, _ := parser.ParseFile(l.Fset, p, nil, parser.SkipObjectResolution); f != nil {
+			StripBodies(f, token.NoPos)
 			out[p] = f
 		}
 	}
 	return out
+}
+
+// StripBodies drops the bodies of all function declarations except the one whose range contains keep. Package-level
+// facts (scopes, types, method sets) do not depend on function bodies, so this is fact-preserving for everything
+// outside the edited function. Package-level var initializers (incl. func literals) are kept.
+func StripBodies(f *ast.File, keep token.Pos) {
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+			if keep.IsValid() && fd.Pos() <= keep && keep <= fd.End() {
+				continue
+			}
+			fd.Body = nil
+		}
+	}
+}
+
+// skeletonDecl returns d, or for a function declaration a shallow copy without its body (cached ASTs stay intact).
+func skeletonDecl(d ast.Decl) ast.Decl {
+	if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+		c := *fd
+		c.Body = nil
+		return &c
+	}
+	return d
 }
 
 // ImportPathOf returns the module import path for a repository-relative package directory ("" if no module).
