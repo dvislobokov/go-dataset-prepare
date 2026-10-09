@@ -32,7 +32,7 @@ validation and rendering are the Go CLI `goflc` (`cmd/goflc`, `internal/…`, st
   runnable, load ~600); `original_scope` must cover carets in function literals (Ginkgo `var _ = Describe(…, func(){…})`, 5× faster);
   the HF upload is the tail — batches are merged in parallel and up to 3 commits upload concurrently.
 
-## Next steps (shared plan with the C# project)
+## Next steps (shared plan with the C# project; context spec: docs/CONTEXT_SPEC-RU.md)
 Dependency profile `DEPS` (external import paths used in ≥2 other files of the repository), the context block spec for the plugin
 (go-psi side), training documents with/without context encoded with `go-16384.bpe`, evaluation with/without context, proxy model
 on a rented GPU before plugin work.
