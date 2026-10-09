@@ -277,7 +277,10 @@ def cli_env(args) -> dict:
     # GOPROXY=off / GOTOOLCHAIN=local / GOFLAGS: goflc never runs the go command; these make any accidental use inert.
     env.update({"GOROOT": args.go_root, "PATH": os.path.join(args.go_root, "bin") + os.pathsep + env.get("PATH", ""),
                 "GOMEMLIMIT": str(args.rss_limit_gb * 1024 ** 3 * 3 // 4), "GOPROXY": "off", "GOTOOLCHAIN": "local",
-                "GOFLAGS": "-mod=mod", "GONOSUMDB": "*", "GOTELEMETRY": "off", "CGO_ENABLED": "0"})
+                "GOFLAGS": "-mod=mod", "GONOSUMDB": "*", "GOTELEMETRY": "off", "CGO_ENABLED": "0",
+                # the Go runtime sizes its scheduler and GC workers by the machine's cores (128 here): dozens of concurrent
+                # goflc processes then run ~400 runnable threads and thrash; each process gets the cores of its workers
+                "GOMAXPROCS": str(max(2, args.workers))})
     return env
 
 
