@@ -13,10 +13,11 @@ import json
 import math
 import os
 import re
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-IN = os.path.join(HERE, "..", "go-search.jsonl")
-OUT = HERE
+IN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "go-search.jsonl")
+OUT = sys.argv[2] if len(sys.argv) > 2 else HERE
 
 PERMISSIVE = {"MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "Unlicense", "ISC", "MS-PL", "Zlib"}
 RESTRICTED_PREFIX = ("GPL", "LGPL", "AGPL", "MPL", "EPL", "OSL", "EUPL", "MS-RL", "CC-BY-SA", "MulanPSL",
