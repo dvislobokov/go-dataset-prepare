@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS batches (id INTEGER PRIMARY KEY, repos TEXT, status T
 class State:
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=60)
+        self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=600)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.lock = threading.Lock()
         with self.lock:
@@ -161,26 +161,33 @@ class State:
 
 
 def claim_files(st: State, rid: str, shas) -> set:
-    """Cross-repository dedup in ONE transaction: claim every file hash for [rid] (first claim wins) and return the hashes
-    it owns. Per-file autocommit statements from ~70 concurrent pack processes serialised on the WAL lock and dominated
-    the pack stage; lookups go through the primary key (no scan by repo_id)."""
+    """Cross-repository dedup: claim every file hash for [rid] (first claim wins) and return the hashes it owns. One
+    executemany in a short transaction (the write lock is held only for it), ownership read outside the transaction through
+    the primary key; "database is locked" under heavy contention is retried instead of failing the repository."""
     shas = sorted(set(shas))
     owned = set()
     if not shas:
         return owned
-    with st.lock:
-        db = st.db
-        db.execute("BEGIN IMMEDIATE")
+    rows = [(s, rid) for s in shas]
+    for attempt in range(20):
         try:
-            db.executemany("INSERT OR IGNORE INTO file_owner(sha256, repo_id) VALUES(?,?)", [(s, rid) for s in shas])
-            for i in range(0, len(shas), 500):
-                part = shas[i:i + 500]
-                owned.update(r[0] for r in db.execute(
-                    f"SELECT sha256 FROM file_owner WHERE repo_id=? AND sha256 IN ({','.join('?' * len(part))})", [rid, *part]))
-            db.execute("COMMIT")
-        except BaseException:
-            db.execute("ROLLBACK")
-            raise
+            with st.lock:
+                st.db.execute("BEGIN IMMEDIATE")
+                try:
+                    st.db.executemany("INSERT OR IGNORE INTO file_owner(sha256, repo_id) VALUES(?,?)", rows)
+                    st.db.execute("COMMIT")
+                except BaseException:
+                    st.db.execute("ROLLBACK")
+                    raise
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or attempt == 19:
+                raise
+            time.sleep(min(30, 1 + attempt * 2))
+    for i in range(0, len(shas), 500):
+        part = shas[i:i + 500]
+        owned.update(r[0] for r in st.q(
+            f"SELECT sha256 FROM file_owner WHERE repo_id=? AND sha256 IN ({','.join('?' * len(part))})", [rid, *part]))
     return owned
 
 
@@ -980,7 +987,14 @@ def main():
         try:
             while not STOP.is_set():
                 final = drain.is_set()
-                bid = make_batch(st, args, log, final=final)
+                try:
+                    bid = make_batch(st, args, log, final=final)
+                except sqlite3.OperationalError as e:
+                    if "locked" not in str(e):
+                        raise
+                    log("uploader_retry", error=str(e)[:200])
+                    time.sleep(10)
+                    continue
                 if bid is not None:
                     write_and_upload_batch(bid, st, args, log, api)
                     continue
