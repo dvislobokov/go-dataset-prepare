@@ -73,14 +73,7 @@ func analyzeOriginal(l *Loader, rec *Record, op *origPkg, abs string, src []byte
 		return false
 	}
 	pos := tf.Pos(caret)
-	inBody := false
-	for _, d := range file.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil && fd.Body.Lbrace < pos && pos <= fd.Body.Rbrace {
-			inBody = true
-			break
-		}
-	}
-	if !inBody {
+	if !inFuncBody(file, pos) {
 		return false
 	}
 	tc := identCounts(targetText)
@@ -93,6 +86,35 @@ func analyzeOriginal(l *Loader, rec *Record, op *origPkg, abs string, src []byte
 	r2.TypeErrors = op.nerr
 	*rec = r2
 	return true
+}
+
+// inFuncBody reports whether pos is inside the body of a function declaration or of a function literal anywhere in the
+// file — including literals in package-level initializers (`var _ = Describe("x", func() { ... })`, handler tables),
+// which hold most of the code of Ginkgo-style test files.
+func inFuncBody(file *ast.File, pos token.Pos) bool {
+	found := false
+	for _, d := range file.Decls {
+		if d.Pos() > pos || pos > d.End() {
+			continue
+		}
+		ast.Inspect(d, func(n ast.Node) bool {
+			if found || n == nil || n.Pos() > pos || pos > n.End() {
+				return false
+			}
+			switch x := n.(type) {
+			case *ast.FuncDecl:
+				if x.Body != nil && x.Body.Lbrace < pos && pos <= x.Body.Rbrace {
+					found = true
+				}
+			case *ast.FuncLit:
+				if x.Body != nil && x.Body.Lbrace < pos && pos <= x.Body.Rbrace {
+					found = true
+				}
+			}
+			return !found
+		})
+	}
+	return found
 }
 
 func identCounts(s string) map[string]int {

@@ -503,3 +503,80 @@ func TestQuarantineLeak(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// Ginkgo-style files keep all code in function literals of package-level initializers. The original_scope engine must
+// serve carets inside them, agree with the snapshot (reference) engine and never expose the hidden target.
+func TestOriginalEngineInsidePackageLevelFuncLit(t *testing.T) {
+	files := map[string]string{"go.mod": "module example.com/m\n", "a_test.go": `package a
+
+type Client struct{ Name string }
+
+func (c *Client) Fetch(id int) (string, error) { return "", nil }
+
+func Describe(name string, body func()) bool { body(); return true }
+func It(name string, body func())            { body() }
+
+var handlers = map[string]func(int) string{
+	"a": func(n int) string { hiddenInOtherLiteral := n; _ = hiddenInOtherLiteral; return "" },
+}
+
+var _ = Describe("client", func() {
+	var c *Client
+	It("fetches", func() {
+		id := 42
+		res, err := c.▮Fetch(id)
+		secretOnlyAfter := res
+		_, _ = secretOnlyAfter, err
+	})
+})
+`}
+	ro, ok := atOriginal(t, files)
+	if !ok || ro.AnalysisEngine != "original_scope" {
+		t.Fatal("caret inside a package-level function literal must use original_scope")
+	}
+	rs := at(t, files, "editor_snapshot")
+	if rs.AnalysisEngine != "snapshot_typecheck" {
+		t.Fatalf("reference engine %s", rs.AnalysisEngine)
+	}
+	for _, r := range []*Record{ro, rs} {
+		loc := names(r.Locals)
+		if loc["id"] != "int" || loc["c"] != "*Client" {
+			t.Fatalf("%s: locals %v", r.AnalysisEngine, loc)
+		}
+		for _, bad := range []string{"res", "err", "secretOnlyAfter", "hiddenInOtherLiteral"} {
+			if _, leak := loc[bad]; leak {
+				t.Fatalf("%s: %s visible at the caret: %v", r.AnalysisEngine, bad, loc)
+			}
+		}
+		if _, ok := names(r.Members)["Fetch"]; !ok {
+			t.Fatalf("%s: members %v", r.AnalysisEngine, names(r.Members))
+		}
+		if len(r.Leakage.Violations) != 0 {
+			t.Fatalf("%s: leakage %+v", r.AnalysisEngine, r.Leakage)
+		}
+	}
+	if len(names(ro.Locals)) != len(names(rs.Locals)) {
+		t.Fatalf("engines disagree: original %v snapshot %v", names(ro.Locals), names(rs.Locals))
+	}
+}
+
+// Stubbing literal bodies keeps the declared types: a package-level func variable is still typed by its signature.
+func TestStrippedLiteralsKeepSignatures(t *testing.T) {
+	r := at(t, map[string]string{"go.mod": "module example.com/m\n", "a.go": `package a
+
+var format = func(n int) string { tmp := n * 2; _ = tmp; return "" }
+
+type T struct{}
+
+func (T) M() {
+	s := format(1)
+	▮_ = s
+}
+`}, "editor_snapshot")
+	if names(r.Locals)["s"] != "string" {
+		t.Fatalf("locals %v", names(r.Locals))
+	}
+	if _, leak := names(r.Locals)["tmp"]; leak {
+		t.Fatal("local of another literal visible")
+	}
+}

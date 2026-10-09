@@ -160,6 +160,30 @@ class State:
             self.db.execute(sql, args)
 
 
+def claim_files(st: State, rid: str, shas) -> set:
+    """Cross-repository dedup in ONE transaction: claim every file hash for [rid] (first claim wins) and return the hashes
+    it owns. Per-file autocommit statements from ~70 concurrent pack processes serialised on the WAL lock and dominated
+    the pack stage; lookups go through the primary key (no scan by repo_id)."""
+    shas = sorted(set(shas))
+    owned = set()
+    if not shas:
+        return owned
+    with st.lock:
+        db = st.db
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.executemany("INSERT OR IGNORE INTO file_owner(sha256, repo_id) VALUES(?,?)", [(s, rid) for s in shas])
+            for i in range(0, len(shas), 500):
+                part = shas[i:i + 500]
+                owned.update(r[0] for r in db.execute(
+                    f"SELECT sha256 FROM file_owner WHERE repo_id=? AND sha256 IN ({','.join('?' * len(part))})", [rid, *part]))
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+    return owned
+
+
 # ---------------------------------------------------------------------------------------------------------- manifest
 def split_of(group: str, seed: str, eval_frac: float, test_frac: float) -> str:
     u = uniform(seed, "repo_split", group)
@@ -488,9 +512,10 @@ def pack_corpus(job, rev, data_dir, dest, st: State) -> dict:
     os.makedirs(dest, exist_ok=True)
     rid = job["repo_id"]
     rows, dup, nbytes = [], 0, 0
-    for r in jsonl(os.path.join(data_dir, "corpus.jsonl")):
-        st.x("INSERT OR IGNORE INTO file_owner(sha256, repo_id) VALUES(?,?)", (r["sha256"], rid))
-        if st.q("SELECT repo_id FROM file_owner WHERE sha256=?", (r["sha256"],))[0][0] != rid:
+    records = list(jsonl(os.path.join(data_dir, "corpus.jsonl")))
+    owned = claim_files(st, rid, (r["sha256"] for r in records))
+    for r in records:
+        if r["sha256"] not in owned:
             dup += 1
             continue
         r["revision"] = rev
@@ -594,9 +619,7 @@ def pack_repo(job, rev, data_dir, prompt_dir, dest, st: State, args) -> dict:
     rid = job["repo_id"]
     # Cross-repository dedup: the first repository that claims a file hash owns its samples.
     shas = {r["sha256"] for r in jsonl(os.path.join(data_dir, "discovery.jsonl")) if r.get("accepted") and r.get("sha256")}
-    for sha in shas:
-        st.x("INSERT OR IGNORE INTO file_owner(sha256, repo_id) VALUES(?,?)", (sha, rid))
-    owned = {r[0] for r in st.q("SELECT sha256 FROM file_owner WHERE repo_id=?", (rid,))}
+    owned = claim_files(st, rid, shas)
     keep_ids = set()
     rows = []
     dup = 0

@@ -274,24 +274,198 @@ func (l *Loader) ParseFiles(paths []string) map[string]*ast.File {
 // facts (scopes, types, method sets) do not depend on function bodies, so this is fact-preserving for everything
 // outside the edited function. Package-level var initializers (incl. func literals) are kept.
 func StripBodies(f *ast.File, keep token.Pos) {
-	for _, d := range f.Decls {
+	for i, d := range f.Decls {
 		if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
 			if keep.IsValid() && fd.Pos() <= keep && keep <= fd.End() {
+				// the edited function stays, but closures elsewhere in it are irrelevant to the caret too
+				stripLitsIn(fd.Body, keep)
 				continue
 			}
 			fd.Body = nil
+			continue
 		}
+		f.Decls[i] = stripGenDecl(d, keep)
 	}
 }
 
-// skeletonDecl returns d, or for a function declaration a shallow copy without its body (cached ASTs stay intact).
+// skeletonDecl returns d, or for a function declaration a shallow copy without its body; function literals in package-level
+// initializers (`var _ = Describe("x", func() {...})`, handler tables) get stub bodies in a copy (cached ASTs stay intact).
 func skeletonDecl(d ast.Decl) ast.Decl {
 	if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
 		c := *fd
 		c.Body = nil
 		return &c
 	}
-	return d
+	return stripGenDecl(d, token.NoPos)
+}
+
+// stripGenDecl returns d with every function literal in its value specs that does not contain keep replaced by a stub
+// (copy-on-write along the paths to the literals; d itself is never modified). Type-checking such a declaration then costs
+// its signatures only: the bodies cannot influence facts at a caret outside them.
+func stripGenDecl(d ast.Decl, keep token.Pos) ast.Decl {
+	g, ok := d.(*ast.GenDecl)
+	if !ok || g.Tok != token.VAR && g.Tok != token.CONST {
+		return d
+	}
+	var specs []ast.Spec
+	for i, sp := range g.Specs {
+		vs, ok := sp.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		var vals []ast.Expr
+		for j, v := range vs.Values {
+			if nv := stripLits(v, keep); nv != v {
+				if vals == nil {
+					vals = append([]ast.Expr{}, vs.Values...)
+				}
+				vals[j] = nv
+			}
+		}
+		if vals != nil {
+			if specs == nil {
+				specs = append([]ast.Spec{}, g.Specs...)
+			}
+			c := *vs
+			c.Values = vals
+			specs[i] = &c
+		}
+	}
+	if specs == nil {
+		return d
+	}
+	c := *g
+	c.Specs = specs
+	return &c
+}
+
+// stripLits returns e, or a copy in which function literals not containing keep have stub bodies. Only the expression
+// kinds that wrap literals in practice are copied (calls, composite literals, key/value, unary, paren, binary, selector).
+func stripLits(e ast.Expr, keep token.Pos) ast.Expr {
+	list := func(xs []ast.Expr) ([]ast.Expr, bool) {
+		var out []ast.Expr
+		for i, x := range xs {
+			if nx := stripLits(x, keep); nx != x {
+				if out == nil {
+					out = append([]ast.Expr{}, xs...)
+				}
+				out[i] = nx
+			}
+		}
+		return out, out != nil
+	}
+	switch x := e.(type) {
+	case *ast.FuncLit:
+		if x.Body == nil || keep.IsValid() && x.Pos() <= keep && keep <= x.End() {
+			if x.Body != nil && keep.IsValid() {
+				// keep this literal, but strip literals nested in it that do not contain the caret
+				c := *x
+				b := *x.Body
+				b.List = append([]ast.Stmt{}, x.Body.List...)
+				stripLitsIn(&b, keep)
+				c.Body = &b
+				return &c
+			}
+			return e
+		}
+		c := *x
+		c.Body = stubBody(x.Body)
+		return &c
+	case *ast.CallExpr:
+		fun := stripLits(x.Fun, keep)
+		args, changed := list(x.Args)
+		if fun == x.Fun && !changed {
+			return e
+		}
+		c := *x
+		c.Fun = fun
+		if changed {
+			c.Args = args
+		}
+		return &c
+	case *ast.CompositeLit:
+		elts, changed := list(x.Elts)
+		if !changed {
+			return e
+		}
+		c := *x
+		c.Elts = elts
+		return &c
+	case *ast.KeyValueExpr:
+		v := stripLits(x.Value, keep)
+		if v == x.Value {
+			return e
+		}
+		c := *x
+		c.Value = v
+		return &c
+	case *ast.UnaryExpr:
+		v := stripLits(x.X, keep)
+		if v == x.X {
+			return e
+		}
+		c := *x
+		c.X = v
+		return &c
+	case *ast.ParenExpr:
+		v := stripLits(x.X, keep)
+		if v == x.X {
+			return e
+		}
+		c := *x
+		c.X = v
+		return &c
+	case *ast.BinaryExpr:
+		a, b := stripLits(x.X, keep), stripLits(x.Y, keep)
+		if a == x.X && b == x.Y {
+			return e
+		}
+		c := *x
+		c.X, c.Y = a, b
+		return &c
+	case *ast.SelectorExpr:
+		v := stripLits(x.X, keep)
+		if v == x.X {
+			return e
+		}
+		c := *x
+		c.X = v
+		return &c
+	}
+	return e
+}
+
+// stripLitsIn stubs, in place, the function literals of a freshly parsed (not cached) block that do not contain keep:
+// expression statements, assignments and declarations such as `It("x", func() {...})` or `h := func() {...}`.
+func stripLitsIn(b *ast.BlockStmt, keep token.Pos) {
+	for _, st := range b.List {
+		switch s := st.(type) {
+		case *ast.ExprStmt:
+			s.X = stripLits(s.X, keep)
+		case *ast.AssignStmt:
+			for i, r := range s.Rhs {
+				s.Rhs[i] = stripLits(r, keep)
+			}
+		case *ast.DeclStmt:
+			s.Decl = stripGenDecl(s.Decl, keep)
+		case *ast.DeferStmt:
+			if c, ok := stripLits(s.Call, keep).(*ast.CallExpr); ok {
+				s.Call = c
+			}
+		case *ast.GoStmt:
+			if c, ok := stripLits(s.Call, keep).(*ast.CallExpr); ok {
+				s.Call = c
+			}
+		}
+	}
+}
+
+// stubBody is `{ panic(0) }` at the original brace positions: a terminating statement, so a literal with results stays
+// free of "missing return" errors, and no identifiers of the original body survive.
+func stubBody(b *ast.BlockStmt) *ast.BlockStmt {
+	call := &ast.CallExpr{Fun: &ast.Ident{NamePos: b.Lbrace, Name: "panic"}, Lparen: b.Lbrace,
+		Args: []ast.Expr{&ast.BasicLit{ValuePos: b.Lbrace, Kind: token.INT, Value: "0"}}, Rparen: b.Lbrace}
+	return &ast.BlockStmt{Lbrace: b.Lbrace, List: []ast.Stmt{&ast.ExprStmt{X: call}}, Rbrace: b.Rbrace}
 }
 
 // ImportPathOf returns the module import path for a repository-relative package directory ("" if no module).
