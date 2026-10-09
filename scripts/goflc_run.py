@@ -818,6 +818,13 @@ def make_batch(st: State, args, log: Log, final: bool) -> int | None:
 
 
 def write_and_upload_batch(bid: int, st: State, args, log: Log, api):
+    upload_batch(write_batch(bid, st, args, log, api), st, args, log, api)
+
+
+def write_batch(bid: int, st: State, args, log: Log, api) -> dict:
+    """Merge the per-repository Parquet files of a batch into the staging folder (configs and splits in parallel threads;
+    pyarrow releases the GIL), plus provenance rows and README. Returns the context for upload_batch."""
+    import concurrent.futures as cf
     import pyarrow as pa
     import pyarrow.parquet as pq
     repos = json.loads(st.q("SELECT repos FROM batches WHERE id=?", (bid,))[0][0])
@@ -825,20 +832,27 @@ def write_and_upload_batch(bid: int, st: State, args, log: Log, api):
     sc = schemas()
     stage = os.path.join(args.out, "upload", f"batch-{bid:06d}")
     shutil.rmtree(stage, ignore_errors=True)
+    split_of_repo = {rid: st.q("SELECT split FROM jobs WHERE repo_id=?", (rid,))[0][0] for rid in repos}
+    cfgs = ("corpus",) if args.corpus_only else ("samples", "semantic", "prompts")
+
+    def merge(cfg, split):
+        paths = [os.path.join(args.out, "pending", slug(rid), f"{cfg}.parquet") for rid in repos if split_of_repo[rid] == split]
+        tables = [pq.read_table(p, schema=sc[cfg]) for p in paths if os.path.exists(p)]
+        if not tables:
+            return None
+        t = pa.concat_tables(tables)
+        out = os.path.join(stage, "data", cfg, f"{split}-{args.run_tag}-{bid:06d}.parquet")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        pq.write_table(t, out, compression="zstd", row_group_size=20000)
+        return t.num_rows
+
     counts = {}
-    for cfg in (("corpus",) if args.corpus_only else ("samples", "semantic", "prompts")):
-        tables_by_split: dict[str, list] = {}
-        for rid in repos:
-            split = st.q("SELECT split FROM jobs WHERE repo_id=?", (rid,))[0][0]
-            p = os.path.join(args.out, "pending", slug(rid), f"{cfg}.parquet")
-            if os.path.exists(p):
-                tables_by_split.setdefault(split, []).append(pq.read_table(p, schema=sc[cfg]))
-        for split, tables in tables_by_split.items():
-            t = pa.concat_tables(tables)
-            out = os.path.join(stage, "data", cfg, f"{split}-{args.run_tag}-{bid:06d}.parquet")
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            pq.write_table(t, out, compression="zstd", row_group_size=20000)
-            counts[f"{cfg}/{split}"] = t.num_rows
+    with cf.ThreadPoolExecutor(max_workers=8) as pool:
+        futs = {(cfg, sp): pool.submit(merge, cfg, sp) for cfg in cfgs for sp in sorted(set(split_of_repo.values()))}
+        for (cfg, sp), f in futs.items():
+            n = f.result()
+            if n is not None:
+                counts[f"{cfg}/{sp}"] = n
     # provenance rows: this batch + all newly finished skipped/failed repositories
     rep = st.q("SELECT repo_id, revision, license, split, grp, status, stats, reason, samples, cs_bytes FROM jobs "  # cs_bytes column holds Go bytes (state schema shared with the C# run)
                "WHERE batch=? OR (status IN ('skipped','failed') AND reported=0)", (bid,))
@@ -865,6 +879,13 @@ def write_and_upload_batch(bid: int, st: State, args, log: Log, api):
         refresh_remote_files(api, args)  # picks up configs uploaded by a parallel corpus pass
         open(os.path.join(stage, "README.md"), "w").write(readme(st, args))
     open(os.path.join(stage, "LICENSE.md"), "w").write(LICENSE_MD)
+    return {"bid": bid, "repos": repos, "stage": stage, "counts": counts, "rrows": rrows, "t_merge": t_merge,
+            "merge_s": round(time.time() - t_merge, 1)}
+
+
+def upload_batch(ctx: dict, st: State, args, log: Log, api):
+    """Upload a staged batch and record it (one upload at a time; the next batch can be merged meanwhile)."""
+    bid, repos, stage, counts, rrows = ctx["bid"], ctx["repos"], ctx["stage"], ctx["counts"], ctx["rrows"]
     t_upload = time.time()
     stage_bytes = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(stage) for f in fs)
     if api is not None:
@@ -887,7 +908,7 @@ def write_and_upload_batch(bid: int, st: State, args, log: Log, api):
         for rid in repos:
             shutil.rmtree(os.path.join(args.out, "pending", slug(rid)), ignore_errors=True)
     log("batch_uploaded", batch=bid, repos=len(repos), rows=counts, remote=api is not None, mb=round(stage_bytes / 2**20, 1),
-        merge_s=round(t_upload - t_merge, 1), upload_s=round(time.time() - t_upload, 1))
+        merge_s=ctx["merge_s"], upload_s=round(time.time() - t_upload, 1))
 
 
 def refresh_remote_files(api, args):
@@ -934,6 +955,7 @@ def main():
     ap.add_argument("--seed", default="20261009")
     ap.add_argument("--eval-fraction", type=float, default=0.02)
     ap.add_argument("--test-fraction", type=float, default=0.02)
+    ap.add_argument("--upload-parallel", type=int, default=3, help="batches uploaded concurrently (separate commits)")
     ap.add_argument("--batch-samples", type=int, default=200000, help="samples per upload batch (target)")
     ap.add_argument("--hf-repo", default="dvislobokov/go-ml-complation")
     ap.add_argument("--hf-token-file", default="/srv/flc/secrets/HF_TOKEN")
@@ -987,6 +1009,18 @@ def main():
     upload_error: list[BaseException] = []
 
     def uploader():
+        # pipeline: up to --upload-parallel batches upload (separate commits) while the next batch is merged here;
+        # a single upload stream used a fraction of the link
+        up_pool = cf.ThreadPoolExecutor(max_workers=args.upload_parallel, thread_name_prefix="uploader")
+        in_flight: list = []
+
+        def settle(limit):
+            while len(in_flight) > limit:
+                done, _ = cf.wait(in_flight, return_when=cf.FIRST_COMPLETED)
+                for f in done:
+                    in_flight.remove(f)
+                    f.result()
+
         try:
             while not STOP.is_set():
                 final = drain.is_set()
@@ -999,11 +1033,15 @@ def main():
                     time.sleep(10)
                     continue
                 if bid is not None:
-                    write_and_upload_batch(bid, st, args, log, api)
+                    ctx = write_batch(bid, st, args, log, api)
+                    settle(args.upload_parallel - 1)
+                    in_flight.append(up_pool.submit(upload_batch, ctx, st, args, log, api))
                     continue
+                settle(0)
                 if final:
                     return
                 time.sleep(10)
+            settle(0)
         except BaseException as e:  # noqa: BLE001 - surface in main thread, stop scheduling
             upload_error.append(e)
             log("error", where="uploader", trace=traceback.format_exc()[-2000:])
