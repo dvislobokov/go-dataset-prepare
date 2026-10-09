@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flc-dataset.local/schemas/corpus-file.v1.go.schema.json",
+  "title": "corpus-file/v1 (Go profile) — source file for causal pretraining",
+  "description": "Exact source. Original bytes = (has_bom ? EF BB BF : empty) + UTF8(content); sha256 is over those bytes. Newlines are preserved as in the file. content_normalized is always false in this phase.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version","repository_id","revision","relative_path","language","sha256","bytes","license","license_reason","encoding","has_bom","newline_style","project","package_name","is_test","split","lines","build_constraint","build_match","content","content_normalized"],
+  "properties": {
+    "schema_version": { "const": "corpus-file/v1" },
+    "repository_id": { "type": "string" },
+    "revision": { "type": ["string","null"], "pattern": "^[0-9a-f]{40}$" },
+    "relative_path": { "type": "string", "minLength": 1 },
+    "language": { "const": "go" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "bytes": { "type": "integer", "minimum": 0 },
+    "license": { "type": ["string","null"], "description": "SPDX id when verified from the repo LICENSE text, else null." },
+    "license_reason": { "type": ["string","null"] },
+    "encoding": { "const": "utf-8" },
+    "has_bom": { "type": "boolean" },
+    "newline_style": { "enum": ["lf","crlf","cr","other","mixed","none"] },
+    "project": { "type": ["string","null"] },
+    "package_name": { "type": "string" },
+    "is_test": { "type": "boolean" },
+    "split": { "enum": ["train","eval","test","pilot"] },
+    "lines": { "type": "integer", "minimum": 1 },
+    "build_constraint": { "type": ["string","null"] },
+    "build_match": { "type": "boolean" },
+    "content": { "type": "string" },
+    "content_normalized": { "const": false }
+  }
+}

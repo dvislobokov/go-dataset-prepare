@@ -1,0 +1,381 @@
+{
+  "generator": "scripts/benchmark.py",
+  "bin": "/data/go-dataset/bin/goflc",
+  "repos": {
+    "ttlcache": {
+      "revision": "230d2c7db17f98285e293c7c4c82f4c97c976050",
+      "license": "MIT",
+      "module_path": "github.com/jellydator/ttlcache/v3",
+      "files_accepted": 18,
+      "files_test": 5,
+      "files_skipped": {},
+      "samples_total": 1676,
+      "samples_by_kind": {
+        "after_keyword": 83,
+        "after_operator": 58,
+        "argument_list": 238,
+        "composite_literal": 34,
+        "control_flow": 17,
+        "error_handling": 6,
+        "func_literal": 12,
+        "identifier_partial": 238,
+        "line_start": 466,
+        "log_message": 2,
+        "member_access": 445,
+        "token_boundary": 77
+      }
+    },
+    "httpmock": {
+      "revision": "ae9b91658ce4ddcfc8b5950a87de488384d0cff1",
+      "license": "MIT",
+      "module_path": "github.com/jarcoal/httpmock",
+      "files_accepted": 24,
+      "files_test": 13,
+      "files_skipped": {},
+      "samples_total": 2151,
+      "samples_by_kind": {
+        "after_keyword": 125,
+        "after_operator": 92,
+        "argument_list": 378,
+        "composite_literal": 44,
+        "control_flow": 55,
+        "error_handling": 9,
+        "func_literal": 30,
+        "identifier_partial": 233,
+        "line_start": 567,
+        "log_message": 26,
+        "member_access": 496,
+        "token_boundary": 96
+      }
+    }
+  },
+  "experiments": {
+    "ttlcache": {
+      "E1_syntax_seq": {
+        "status": "ok",
+        "wall_ms": 62.557,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 17.476998,
+          "syntax_cpu_ms": 54.478873,
+          "write_cpu_ms": 14.138778
+        },
+        "file_latency_ms": {
+          "max": 23.488,
+          "p50": 0.878,
+          "p95": 11.478,
+          "p99": 23.488
+        },
+        "samples_per_sec": 26791.1,
+        "source_mib_per_sec": 1.638,
+        "peak_rss_mb": 20.9,
+        "input_bytes": 107439,
+        "workers": 1,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 0
+      },
+      "E1_syntax_par": {
+        "status": "ok",
+        "wall_ms": 47.254,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 18.173614,
+          "syntax_cpu_ms": 66.099688,
+          "write_cpu_ms": 13.139622
+        },
+        "file_latency_ms": {
+          "max": 26.74,
+          "p50": 1.417,
+          "p95": 12.626,
+          "p99": 26.74
+        },
+        "samples_per_sec": 35467.6,
+        "source_mib_per_sec": 2.168,
+        "peak_rss_mb": 30.3,
+        "input_bytes": 107439,
+        "workers": 8,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 0
+      },
+      "E2_semantic_subset": {
+        "status": "ok",
+        "wall_ms": 2138.309,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 19.201089,
+          "semantic_cpu_ms": 2090.923793,
+          "syntax_cpu_ms": 65.018681,
+          "write_cpu_ms": 13.461994
+        },
+        "file_latency_ms": {
+          "max": 25.995,
+          "p50": 1.283,
+          "p95": 13.59,
+          "p99": 25.995
+        },
+        "samples_per_sec": 783.8,
+        "source_mib_per_sec": 0.048,
+        "peak_rss_mb": 305.2,
+        "input_bytes": 107439,
+        "workers": 8,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 488,
+        "semantic_counters": {
+          "semantic.editor_snapshot.expected_type": 26,
+          "semantic.editor_snapshot.members": 53,
+          "semantic.editor_snapshot.partially_resolved": 177,
+          "semantic.editor_snapshot.reason.external_imports_unresolved": 167,
+          "semantic.editor_snapshot.reason.unresolved_import": 10,
+          "semantic.editor_snapshot.resolved": 67,
+          "semantic.editor_snapshot.target_identifier_overlap": 162,
+          "semantic.loader.import_cache_hits": 3871,
+          "semantic.loader.imported_packages_with_type_errors": 1,
+          "semantic.loader.packages_loaded_module": 1,
+          "semantic.loader.packages_loaded_std": 190,
+          "semantic.loader.packages_loaded_std_vendor": 16,
+          "semantic.loader.unresolved_import_paths": 10,
+          "semantic.not_in_subset": 1432,
+          "semantic.packages_parsed": 11,
+          "semantic.strict_prefix.expected_type": 22,
+          "semantic.strict_prefix.members": 46,
+          "semantic.strict_prefix.partially_resolved": 176,
+          "semantic.strict_prefix.reason.external_imports_unresolved": 159,
+          "semantic.strict_prefix.reason.unresolved_import": 10,
+          "semantic.strict_prefix.reason.unresolved_receiver_type": 7,
+          "semantic.strict_prefix.resolved": 68,
+          "semantic.strict_prefix.target_identifier_overlap": 154
+        }
+      },
+      "E3_semantic_full": {
+        "status": "ok",
+        "wall_ms": 10918.146,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 18.216763,
+          "semantic_cpu_ms": 10871.023247,
+          "syntax_cpu_ms": 64.492992,
+          "write_cpu_ms": 14.603008
+        },
+        "file_latency_ms": {
+          "max": 25.771,
+          "p50": 1.338,
+          "p95": 13.798,
+          "p99": 25.771
+        },
+        "samples_per_sec": 153.5,
+        "source_mib_per_sec": 0.009,
+        "peak_rss_mb": 1417.7,
+        "input_bytes": 107439,
+        "workers": 8,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 3352,
+        "semantic_counters": {
+          "semantic.editor_snapshot.expected_type": 176,
+          "semantic.editor_snapshot.members": 414,
+          "semantic.editor_snapshot.partially_resolved": 1205,
+          "semantic.editor_snapshot.reason.external_imports_unresolved": 1132,
+          "semantic.editor_snapshot.reason.no_package_clause": 16,
+          "semantic.editor_snapshot.reason.unresolved_import": 67,
+          "semantic.editor_snapshot.reason.unresolved_receiver_type": 6,
+          "semantic.editor_snapshot.resolved": 455,
+          "semantic.editor_snapshot.syntax_fallback": 16,
+          "semantic.editor_snapshot.target_identifier_overlap": 1127,
+          "semantic.loader.import_cache_hits": 20138,
+          "semantic.loader.imported_packages_with_type_errors": 1,
+          "semantic.loader.packages_loaded_module": 1,
+          "semantic.loader.packages_loaded_std": 190,
+          "semantic.loader.packages_loaded_std_vendor": 16,
+          "semantic.loader.unresolved_import_paths": 10,
+          "semantic.packages_parsed": 11,
+          "semantic.strict_prefix.expected_type": 148,
+          "semantic.strict_prefix.members": 373,
+          "semantic.strict_prefix.partially_resolved": 1209,
+          "semantic.strict_prefix.reason.external_imports_unresolved": 1094,
+          "semantic.strict_prefix.reason.no_package_clause": 16,
+          "semantic.strict_prefix.reason.unresolved_import": 67,
+          "semantic.strict_prefix.reason.unresolved_receiver_type": 48,
+          "semantic.strict_prefix.resolved": 451,
+          "semantic.strict_prefix.syntax_fallback": 16,
+          "semantic.strict_prefix.target_identifier_overlap": 1081
+        }
+      },
+      "E4_leakage": {
+        "editor_snapshot_resolved": 455,
+        "editor_snapshot_partial": 1205,
+        "strict_prefix_resolved": 451,
+        "strict_prefix_partial": 1209,
+        "editor_target_overlap": 1127,
+        "strict_target_overlap": 1081,
+        "leakage_violations": 0,
+        "validation_ok": true
+      }
+    },
+    "httpmock": {
+      "E1_syntax_seq": {
+        "status": "ok",
+        "wall_ms": 75.552,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 31.144338,
+          "syntax_cpu_ms": 68.510071,
+          "write_cpu_ms": 25.049288
+        },
+        "file_latency_ms": {
+          "max": 14.45,
+          "p50": 0.737,
+          "p95": 12.734,
+          "p99": 14.45
+        },
+        "samples_per_sec": 28470.4,
+        "source_mib_per_sec": 2.479,
+        "peak_rss_mb": 21.7,
+        "input_bytes": 196422,
+        "workers": 1,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 0
+      },
+      "E1_syntax_par": {
+        "status": "ok",
+        "wall_ms": 52.288,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 32.692874,
+          "syntax_cpu_ms": 75.089985,
+          "write_cpu_ms": 22.478489
+        },
+        "file_latency_ms": {
+          "max": 14.917,
+          "p50": 0.966,
+          "p95": 14.135,
+          "p99": 14.917
+        },
+        "samples_per_sec": 41136.9,
+        "source_mib_per_sec": 3.582,
+        "peak_rss_mb": 23.2,
+        "input_bytes": 196422,
+        "workers": 8,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 0
+      },
+      "E2_semantic_subset": {
+        "status": "ok",
+        "wall_ms": 2667.509,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 30.870186,
+          "semantic_cpu_ms": 2615.762628,
+          "syntax_cpu_ms": 80.546003,
+          "write_cpu_ms": 21.573076
+        },
+        "file_latency_ms": {
+          "max": 15.381,
+          "p50": 0.947,
+          "p95": 14.545,
+          "p99": 15.381
+        },
+        "samples_per_sec": 806.4,
+        "source_mib_per_sec": 0.07,
+        "peak_rss_mb": 271.6,
+        "input_bytes": 196422,
+        "workers": 8,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 674,
+        "semantic_counters": {
+          "semantic.editor_snapshot.expected_type": 52,
+          "semantic.editor_snapshot.members": 64,
+          "semantic.editor_snapshot.partially_resolved": 187,
+          "semantic.editor_snapshot.reason.build_constraint_excluded": 1,
+          "semantic.editor_snapshot.reason.external_imports_unresolved": 169,
+          "semantic.editor_snapshot.reason.no_package_clause": 3,
+          "semantic.editor_snapshot.reason.unresolved_import": 11,
+          "semantic.editor_snapshot.reason.unresolved_receiver_type": 7,
+          "semantic.editor_snapshot.resolved": 146,
+          "semantic.editor_snapshot.syntax_fallback": 4,
+          "semantic.editor_snapshot.target_identifier_overlap": 197,
+          "semantic.loader.import_cache_hits": 14063,
+          "semantic.loader.packages_loaded_module": 2,
+          "semantic.loader.packages_loaded_std": 188,
+          "semantic.loader.packages_loaded_std_vendor": 16,
+          "semantic.loader.unresolved_import_paths": 1,
+          "semantic.not_in_subset": 1814,
+          "semantic.packages_parsed": 5,
+          "semantic.strict_prefix.expected_type": 51,
+          "semantic.strict_prefix.members": 64,
+          "semantic.strict_prefix.partially_resolved": 186,
+          "semantic.strict_prefix.reason.build_constraint_excluded": 1,
+          "semantic.strict_prefix.reason.external_imports_unresolved": 168,
+          "semantic.strict_prefix.reason.no_package_clause": 3,
+          "semantic.strict_prefix.reason.unresolved_import": 11,
+          "semantic.strict_prefix.reason.unresolved_receiver_type": 7,
+          "semantic.strict_prefix.resolved": 147,
+          "semantic.strict_prefix.syntax_fallback": 4,
+          "semantic.strict_prefix.target_identifier_overlap": 202
+        }
+      },
+      "E3_semantic_full": {
+        "status": "ok",
+        "wall_ms": 13059.851,
+        "stages_cpu_ms": {
+          "discovery_cpu_ms": 34.702714,
+          "semantic_cpu_ms": 13006.504489,
+          "syntax_cpu_ms": 78.75503,
+          "write_cpu_ms": 21.345457
+        },
+        "file_latency_ms": {
+          "max": 16.007,
+          "p50": 0.787,
+          "p95": 13.751,
+          "p99": 16.007
+        },
+        "samples_per_sec": 164.7,
+        "source_mib_per_sec": 0.014,
+        "peak_rss_mb": 1077.7,
+        "input_bytes": 196422,
+        "workers": 8,
+        "validation_ok": true,
+        "validation_failures": {},
+        "semantic_records": 4302,
+        "semantic_counters": {
+          "semantic.editor_snapshot.expected_type": 369,
+          "semantic.editor_snapshot.members": 452,
+          "semantic.editor_snapshot.partially_resolved": 1076,
+          "semantic.editor_snapshot.reason.build_constraint_excluded": 2,
+          "semantic.editor_snapshot.reason.external_imports_unresolved": 969,
+          "semantic.editor_snapshot.reason.no_package_clause": 8,
+          "semantic.editor_snapshot.reason.unresolved_import": 51,
+          "semantic.editor_snapshot.reason.unresolved_receiver_type": 56,
+          "semantic.editor_snapshot.resolved": 1065,
+          "semantic.editor_snapshot.syntax_fallback": 10,
+          "semantic.editor_snapshot.target_identifier_overlap": 1348,
+          "semantic.loader.import_cache_hits": 83493,
+          "semantic.loader.packages_loaded_module": 2,
+          "semantic.loader.packages_loaded_std": 188,
+          "semantic.loader.packages_loaded_std_vendor": 16,
+          "semantic.loader.unresolved_import_paths": 1,
+          "semantic.packages_parsed": 5,
+          "semantic.strict_prefix.expected_type": 370,
+          "semantic.strict_prefix.members": 447,
+          "semantic.strict_prefix.partially_resolved": 1075,
+          "semantic.strict_prefix.reason.build_constraint_excluded": 2,
+          "semantic.strict_prefix.reason.external_imports_unresolved": 968,
+          "semantic.strict_prefix.reason.no_package_clause": 8,
+          "semantic.strict_prefix.reason.unresolved_import": 50,
+          "semantic.strict_prefix.reason.unresolved_receiver_type": 57,
+          "semantic.strict_prefix.resolved": 1066,
+          "semantic.strict_prefix.syntax_fallback": 10,
+          "semantic.strict_prefix.target_identifier_overlap": 1369
+        }
+      },
+      "E4_leakage": {
+        "editor_snapshot_resolved": 1065,
+        "editor_snapshot_partial": 1076,
+        "strict_prefix_resolved": 1066,
+        "strict_prefix_partial": 1075,
+        "editor_target_overlap": 1348,
+        "strict_target_overlap": 1369,
+        "leakage_violations": 0,
+        "validation_ok": true
+      }
+    }
+  }
+}

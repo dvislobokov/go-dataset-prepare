@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flc-dataset.local/schemas/flc-semantic.v1.go.schema.json",
+  "title": "flc-semantic/v1 (Go profile) — semantic facts at a caret (sidecar keyed by sample_id + visibility_policy)",
+  "description": "Facts are computed with go/types on a snapshot with the hidden target removed (editor_snapshot) or on the prefix only (strict_prefix). Type names are minimal display strings valid at the caret (imported packages shown by package name, own package unqualified). leakage.violations MUST be empty; `goflc validate` fails otherwise.",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name","kind"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "type": "string", "description": "local|local_const|local_type|parameter|named_result|receiver|closure_parameter|field|method|func|type|const|var" },
+        "type": { "type": ["string","null"] },
+        "signature": { "type": ["string","null"] },
+        "exported": { "type": ["boolean","null"] }
+      }
+    },
+    "typeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name","kind","source","members","total_members"],
+      "properties": {
+        "name": { "type": "string" },
+        "kind": { "type": "string" },
+        "source": { "enum": ["local_or_parameter","receiver_field"] },
+        "members": { "type": "array", "items": { "$ref": "#/$defs/fact" } },
+        "total_members": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "required": ["schema_version","sample_id","visibility_policy","analysis_engine","status","reason","project","package_path","leakage","snapshot_repairs"],
+  "properties": {
+    "schema_version": { "const": "flc-semantic/v1" },
+    "sample_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "visibility_policy": { "enum": ["editor_snapshot","strict_prefix"] },
+    "analysis_engine": { "enum": ["package_typecheck", null] },
+    "status": { "enum": ["resolved","partially_resolved","syntax_fallback","failed"] },
+    "reason": { "type": ["string","null"], "description": "unresolved_receiver_type | unresolved_import | external_imports_unresolved | build_constraint_excluded | package_list_failed | package_too_large | document_text_mismatch | no_package_clause | parse_error | caret_out_of_range | typecheck_no_package | exception:<msg>" },
+    "project": { "type": ["string","null"] },
+    "package_path": { "type": ["string","null"] },
+    "enclosing_symbol": { "type": ["string","null"] },
+    "enclosing_kind": { "type": ["string","null"], "description": "func | method | func_literal | package_level" },
+    "enclosing_type": { "type": ["string","null"] },
+    "return_type": { "type": ["string","null"] },
+    "expected_type": { "type": ["string","null"] },
+    "expected_type_source": { "enum": ["argument","return","assignment","initializer","expression_body","condition", null] },
+    "locals": { "type": "array", "items": { "$ref": "#/$defs/fact" } },
+    "parameters": { "type": "array", "items": { "$ref": "#/$defs/fact" } },
+    "receiver_members": { "type": "array", "items": { "$ref": "#/$defs/fact" }, "description": "Fields and methods of the enclosing method's receiver (Go's 'this')." },
+    "package_members": { "type": "array", "items": { "$ref": "#/$defs/fact" }, "description": "Package-level declarations in scope (all files of the package)." },
+    "imports": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["name","path","resolved"], "properties": { "name": {"type":"string"}, "path": {"type":"string"}, "resolved": {"type":"boolean"} } } },
+    "receiver_type": { "type": ["string","null"], "description": "Type/package of the selector base after '.'." },
+    "receiver_kind": { "enum": ["value","type","package", null] },
+    "members": { "type": "array", "items": { "$ref": "#/$defs/fact" }, "description": "Accessible members of receiver_type after '.'; all applicable candidates, never the single one the target uses." },
+    "call_signature": { "type": ["string","null"] },
+    "argument_index": { "type": ["integer","null"], "minimum": 0 },
+    "context_types": { "type": "array", "items": { "$ref": "#/$defs/typeContract" } },
+    "unresolved_imports": { "type": "array", "items": { "type": "string" }, "description": "Import paths go/types could not resolve offline (external modules not downloaded)." },
+    "type_errors": { "type": "integer", "minimum": 0 },
+    "synthetic_suffix": { "type": ["string","null"], "description": "strict_prefix only: the closers appended to the prefix (computed from prefix brackets only)." },
+    "snapshot_repairs": { "type": "array", "items": { "enum": ["phantom_selector","decl_splice"] }, "description": "Parse-robustness devices applied to the snapshot, both using only visible editor text." },
+    "truncated": { "type": "boolean" },
+    "leakage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_identifiers","mentioned","violations"],
+      "properties": {
+        "target_identifiers": { "type": "array", "items": { "type": "string" }, "description": "Identifiers tokenized from the hidden target." },
+        "mentioned": { "type": "array", "items": { "type": "string" }, "description": "Fact names that also occur in the target — legitimate when the symbol exists independently (coverage)." },
+        "violations": { "type": "array", "items": { "type": "string" }, "maxItems": 0, "description": "MUST be empty. name_only_in_target:<n> | local_declared_after_caret:<n> | declared_in_synthetic_suffix:<n>." }
+      }
+    },
+    "prompt": { "type": "string", "description": "Compact debug rendering; the model-facing prompt is produced by a separate versioned render step." }
+  }
+}

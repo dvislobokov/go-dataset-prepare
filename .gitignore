@@ -1,0 +1,21 @@
+# secrets — never commit tokens
+GITHUB_TOKEN
+*TOKEN*
+*.token
+.env
+secrets/
+# pilot checkouts and outputs
+data/repos/
+out/
+*.tmp
+/bin/
+__pycache__/
+# keep the committed pilot benchmark, ignore bulk datasets
+artifacts/*
+!artifacts/benchmarks/
+artifacts/benchmarks/*
+!artifacts/benchmarks/benchmark.json
+!artifacts/benchmarks/benchmark.md
+# search progress log (not the data)
+data/go-search.jsonl.queries.log
+data/go-search.log
