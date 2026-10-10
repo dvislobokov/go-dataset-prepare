@@ -36,3 +36,12 @@ validation and rendering are the Go CLI `goflc` (`cmd/goflc`, `internal/…`, st
 Dependency profile `DEPS` (external import paths used in ≥2 other files of the repository), the context block spec for the plugin
 (go-psi side), training documents with/without context encoded with `go-16384.bpe`, evaluation with/without context, proxy model
 on a rented GPU before plugin work.
+
+## Expansion 2026-10-10 (second server 161.104.54.103, `/srv/flc-go`, same layout)
+- Search 20..99 stars (`scripts/expand_search.sh`) + the 5..19 pools, eval-fresh excluded, processed with tag `g2`
+  (`scripts/expand_run.sh`): 43 356 repositories in the corpus, `engine/go-16384` lm 10.42 G tokens / 41 688 repos.
+- Derived data rebuilt by csharp-dataset-prepare `scripts/finalize_expand.sh LANG_=go`: `decontam/`, `eval-fresh/decontam/`,
+  `deps/`, `caret/go-16384/{train,eval}` (1 050 000 caret documents, 1.15 G noctx tokens, 20 190 repos; 12 000 clean
+  eval-fresh positions), checks all ok.
+- Memory: large repositories reach the 16 GB per-process limit; ~30 concurrent big extracts filled 230 GB — a guard that
+  SIGSTOPs the youngest extract below 20 GB available was used (`/root/memguard.sh`, not in the repo).
